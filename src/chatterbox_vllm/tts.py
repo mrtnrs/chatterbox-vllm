@@ -7,6 +7,7 @@ from vllm import LLM, SamplingParams
 from functools import lru_cache
 import librosa
 import torch
+
 import torch.nn.functional as F
 from safetensors.torch import load_file
 from chatterbox_vllm.models.t3.modules.t3_config import T3Config
@@ -17,6 +18,7 @@ from chatterbox_vllm.models.t3 import SPEECH_TOKEN_OFFSET
 from chatterbox_vllm.models.t3.modules.cond_enc import T3Cond, T3CondEnc
 from chatterbox_vllm.models.t3.modules.learned_pos_emb import LearnedPositionEmbeddings
 from chatterbox_vllm.text_utils import punc_norm
+from transformers import AutoTokenizer  # Add this at the top
 
 
 @dataclass
