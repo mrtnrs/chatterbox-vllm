@@ -120,23 +120,20 @@ class ChatterboxTTS:
 
         total_gpu_memory = torch.cuda.get_device_properties(0).total_memory
         unused_gpu_memory = total_gpu_memory - torch.cuda.memory_allocated()
-        
-        # Heuristic: rough calculation for what percentage of GPU memory to give to vLLM.
-        # Tune this until the 'Maximum concurrency for ___ tokens per request: ___x' is just over 1.
-        # This rough heuristic gives 1.55GB for the model weights plus 128KB per token.
         vllm_memory_needed = (1.55*1024*1024*1024) + (max_batch_size * max_model_len * 1024 * 128)
         vllm_memory_percent = vllm_memory_needed / unused_gpu_memory
 
         print(f"Giving vLLM {vllm_memory_percent * 100:.2f}% of GPU memory ({vllm_memory_needed / 1024**2:.2f} MB)")
 
         t3 = LLM(
-            model=f"./t3-model",
+            model=str(ckpt_dir),
             task="generate",
-            tokenizer="EnTokenizer", # This must be the NAME, not the path.
-            tokenizer_mode="custom",
+            tokenizer=str(ckpt_dir),  # Point to ckpt_dir for tokenizer
+            tokenizer_mode="auto",    # Let vLLM use AutoTokenizer
             max_model_len=max_model_len,
             gpu_memory_utilization=vllm_memory_percent,
             enforce_eager=not compile,
+            trust_remote_code=True,   # Allow loading tokenizer.py
             **kwargs,
         )
 
@@ -158,20 +155,9 @@ class ChatterboxTTS:
         )
 
     @classmethod
-    def from_pretrained(cls,
-                        repo_id: str = REPO_ID,
-                        revision: str = "1b475dffa71fb191cb6d5901215eb6f55635a9b6",
-                        *args, **kwargs) -> 'ChatterboxTTS':
-        for fpath in ["ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json", "conds.pt"]:
-            local_path = hf_hub_download(repo_id=repo_id, filename=fpath, revision=revision)
-
-        # Ensure the symlink in './t3-model/model.safetensors' points to t3_cfg_path
-        t3_cfg_path = Path(local_path).parent / "t3_cfg.safetensors"
-        model_safetensors_path = Path.cwd() / "t3-model" / "model.safetensors"
-        model_safetensors_path.unlink(missing_ok=True)
-        shutil.copyfile(t3_cfg_path, model_safetensors_path)
-
-        return cls.from_local(Path(local_path).parent, *args, **kwargs)
+    def from_pretrained(cls, ckpt_dir: str = "./t3-model", *args, **kwargs) -> 'ChatterboxTTS':
+        # Assume ckpt_dir already contains all necessary files
+        return cls.from_local(Path(ckpt_dir), *args, **kwargs)
 
     @lru_cache(maxsize=10)
     def get_audio_conditionals(self, wav_fpath: Optional[str] = None) -> Tuple[dict[str, Any], torch.Tensor]:
