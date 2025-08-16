@@ -36,12 +36,14 @@ class Conditionals:
         - embedding
     """
     t3: T3Cond
-    gen: dictdef to(self, device):
-    self.t3 = self.t3.to(device=device)
-    for k, v in self.gen.items():
-        if torch.is_tensor(v):
-            self.gen[k] = v.to(device=device)
-    return self
+    gen: dict
+
+    def to(self, device):
+        self.t3 = self.t3.to(device=device)
+        for k, v in self.gen.items():
+            if torch.is_tensor(v):
+                self.gen[k] = v.to(device=device)
+        return self
 
 @classmethod
 def load(cls, fpath):
