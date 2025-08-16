@@ -4,7 +4,7 @@ from typing import List, Optional, Union
 
 import torch
 from tokenizers import Tokenizer
-from transformers import PreTrainedTokenizer
+from transformers import PreTrainedTokenizerFast
 
 
 # Special tokens
@@ -16,9 +16,9 @@ SPECIAL_TOKENS = [SOT, EOT, UNK, SPACE, "[PAD]", "[SEP]", "[CLS]", "[MASK]"]
 
 logger = logging.getLogger(__name__)
 
-class EnTokenizer(PreTrainedTokenizer):
+class EnTokenizer(PreTrainedTokenizerFast):
     """
-    A VLLM-compatible tokenizer that wraps the original Tokenizer implementation.
+    A VLLM-compatible fast tokenizer that wraps the rust-based Tokenizer.
     """
     model_input_names = ["input_ids", "attention_mask"]
     
@@ -32,8 +32,9 @@ class EnTokenizer(PreTrainedTokenizer):
         mask_token: str = "[MASK]",
         **kwargs
     ):
-        self.tokenizer: Tokenizer = Tokenizer.from_file(vocab_file)
+        tokenizer_object = Tokenizer.from_file(vocab_file)
         super().__init__(
+            tokenizer_object=tokenizer_object,
             unk_token=unk_token,
             pad_token=pad_token,
             sep_token=sep_token,
@@ -43,49 +44,36 @@ class EnTokenizer(PreTrainedTokenizer):
         )
         self.check_vocabset_sot_eot()
 
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
-        """
-        Instantiate a tokenizer from a pretrained model or path.
-    
-        Args:
-            pretrained_model_name_or_path: Path to the directory containing tokenizer.json
-            *args: Additional positional arguments (ignored for this tokenizer)
-            **kwargs: Additional arguments to pass to the tokenizer
-        """
-        vocab_file = os.path.join(pretrained_model_name_or_path, "tokenizer.json")
-        if not os.path.exists(vocab_file):
-            raise FileNotFoundError(f"Tokenizer file not found at {vocab_file}")
-    
-        # Set defaults for special tokens if not provided
-        kwargs.setdefault("unk_token", UNK)
-        kwargs.setdefault("pad_token", "[PAD]")
-        kwargs.setdefault("sep_token", "[SEP]")
-        kwargs.setdefault("cls_token", "[CLS]")
-        kwargs.setdefault("mask_token", "[MASK]")
-    
-        return cls(vocab_file=vocab_file, **kwargs)
-
     def check_vocabset_sot_eot(self):
-        voc = self.tokenizer.get_vocab()
+        voc = self.get_vocab()
         assert SOT in voc
         assert EOT in voc
 
     def get_vocab_size(self) -> int:
-        return len(self.tokenizer.get_vocab())
-
-    def get_vocab(self):
-        return self.tokenizer.get_vocab()
+        return self._tokenizer.get_vocab_size()
 
     def _tokenize(self, text: str, **kwargs) -> List[str]:
         text = text.replace(' ', SPACE)
-        return self.tokenizer.encode(text).tokens
+        return super()._tokenize(text, **kwargs)
 
-    def _convert_token_to_id(self, token: str) -> int:
-        return self.tokenizer.token_to_id(token)
+    def encode(self, txt: str, verbose=False, return_tensors: Optional[str] = None, add_special_tokens: bool = True, **kwargs):
+        """Override for custom preprocessing; supports legacy params."""
+        txt = txt.replace(' ', SPACE)
+        encoded = super().encode(txt, add_special_tokens=add_special_tokens, **kwargs)
+        if return_tensors == "pt":
+            return torch.tensor(encoded).unsqueeze(0)
+        return encoded
 
-    def _convert_id_to_token(self, index: int) -> str:
-        return self.tokenizer.id_to_token(index)
+    def decode(self, seq, **kwargs):
+        """Override for custom postprocessing; supports legacy params."""
+        if isinstance(seq, torch.Tensor):
+            seq = seq.cpu().numpy()
+        txt: str = super().decode(seq, **kwargs)
+        txt = txt.replace(' ', '')
+        txt = txt.replace(SPACE, ' ')
+        txt = txt.replace(EOT, '')
+        txt = txt.replace(UNK, '')
+        return txt
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
         text = "".join(tokens)
@@ -98,15 +86,10 @@ class EnTokenizer(PreTrainedTokenizer):
     def save_pretrained(self, save_directory: Union[str, os.PathLike], **kwargs):
         """
         Save the tokenizer to a directory.
-        
-        Args:
-            save_directory: Directory to save the tokenizer to
-            **kwargs: Additional arguments to pass to the tokenizer
         """
         if not os.path.isdir(save_directory):
             os.makedirs(save_directory, exist_ok=True)
-            
-        self.tokenizer.save(os.path.join(save_directory, "tokenizer.json"))
+        self._tokenizer.save(os.path.join(save_directory, "tokenizer.json"))
 
     def text_to_tokens(self, text: str):
         """Legacy method for backward compatibility"""
@@ -114,27 +97,21 @@ class EnTokenizer(PreTrainedTokenizer):
         text_tokens = torch.IntTensor(text_tokens).unsqueeze(0)
         return text_tokens
 
-    def encode(self, txt: str, verbose=False, return_tensors: Optional[str] = None, add_special_tokens: bool = True):
-        """Legacy method for backward compatibility"""
-        txt = txt.replace(' ', SPACE)
-        code = self.tokenizer.encode(txt)
-        ids = code.ids
-        if return_tensors == "pt":
-            return torch.IntTensor(ids).unsqueeze(0)
-        return ids
-
-    def decode(self, seq):
-        """Legacy method for backward compatibility"""
-        if isinstance(seq, torch.Tensor):
-            seq = seq.cpu().numpy()
-
-        txt: str = self.tokenizer.decode(seq, skip_special_tokens=False)
-        txt = txt.replace(' ', '')
-        txt = txt.replace(SPACE, ' ')
-        txt = txt.replace(EOT, '')
-        txt = txt.replace(UNK, '')
-        return txt
-
     @property
     def max_token_id(self) -> int:
-        return max(self.tokenizer.get_vocab().values())
+        return max(self.get_vocab().values())
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *inputs, **kwargs):
+        """
+        Instantiate a tokenizer from a pretrained model or path.
+    
+        Args:
+            pretrained_model_name_or_path: Path to the directory containing tokenizer.json
+            *inputs: Additional positional arguments
+            **kwargs: Additional keyword arguments to pass to the tokenizer
+        """
+        vocab_file = os.path.join(pretrained_model_name_or_path, "tokenizer.json")
+        if not os.path.exists(vocab_file):
+            raise ValueError(f"tokenizer.json not found at {pretrained_model_name_or_path}")
+        return cls(vocab_file=vocab_file, *inputs, **kwargs)
