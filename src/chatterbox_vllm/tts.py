@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union, Tuple, Any
 import time
+import shutil
 
 from vllm import LLM, SamplingParams
 from functools import lru_cache
@@ -120,7 +121,7 @@ class ChatterboxTTS:
         t3 = LLM(
             model=f"./t3-model",
             task="generate",
-            tokenizer="EnTokenizer",
+            tokenizer=str(hf_hub_download(REPO_ID, 'tokenizer.json')),
             tokenizer_mode="custom",
             max_model_len=max_model_len,
             gpu_memory_utilization=vllm_memory_percent,
@@ -157,7 +158,7 @@ class ChatterboxTTS:
         t3_cfg_path = Path(local_path).parent / "t3_cfg.safetensors"
         model_safetensors_path = Path.cwd() / "t3-model" / "model.safetensors"
         model_safetensors_path.unlink(missing_ok=True)
-        model_safetensors_path.symlink_to(t3_cfg_path)
+        shutil.copyfile(t3_cfg_path, model_safetensors_path)
 
         return cls.from_local(Path(local_path).parent, *args, **kwargs)
 
