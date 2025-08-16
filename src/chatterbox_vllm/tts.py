@@ -1,3 +1,14 @@
+# This block is the definitive fix for the custom tokenizer.
+# It runs when this module is imported, ensuring that in ANY process (including vLLM's workers),
+# the custom EnTokenizer is registered with vLLM's internal registry before it's needed.
+try:
+    from vllm.transformers_utils import tokenizer_base
+    from .models.t3.entokenizer import EnTokenizer
+    if "EnTokenizer" not in tokenizer_base._CUSTOM_TOKENIZERS:
+        tokenizer_base._CUSTOM_TOKENIZERS["EnTokenizer"] = EnTokenizer
+except ImportError:
+    pass
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union, Tuple, Any
@@ -121,7 +132,7 @@ class ChatterboxTTS:
         t3 = LLM(
             model=f"./t3-model",
             task="generate",
-            tokenizer=str(hf_hub_download(REPO_ID, 'tokenizer.json')),
+            tokenizer="EnTokenizer", # This must be the NAME, not the path.
             tokenizer_mode="custom",
             max_model_len=max_model_len,
             gpu_memory_utilization=vllm_memory_percent,
