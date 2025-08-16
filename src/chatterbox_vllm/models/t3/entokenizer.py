@@ -44,16 +44,26 @@ class EnTokenizer(PreTrainedTokenizer):
         self.check_vocabset_sot_eot()
 
     @classmethod
-    def from_pretrained(cls, **kwargs):
+    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
         """
         Instantiate a tokenizer from a pretrained model or path.
-        
+    
         Args:
-            pretrained_model_name_or_path: Path to the tokenizer file or model name
+            pretrained_model_name_or_path: Path to the directory containing tokenizer.json
+            *args: Additional positional arguments (ignored for this tokenizer)
             **kwargs: Additional arguments to pass to the tokenizer
         """
-        # Load relative to the current file path
-        vocab_file = os.path.join(os.path.dirname(__file__), "tokenizer.json")
+        vocab_file = os.path.join(pretrained_model_name_or_path, "tokenizer.json")
+        if not os.path.exists(vocab_file):
+            raise FileNotFoundError(f"Tokenizer file not found at {vocab_file}")
+    
+        # Set defaults for special tokens if not provided
+        kwargs.setdefault("unk_token", UNK)
+        kwargs.setdefault("pad_token", "[PAD]")
+        kwargs.setdefault("sep_token", "[SEP]")
+        kwargs.setdefault("cls_token", "[CLS]")
+        kwargs.setdefault("mask_token", "[MASK]")
+    
         return cls(vocab_file=vocab_file, **kwargs)
 
     def check_vocabset_sot_eot(self):
