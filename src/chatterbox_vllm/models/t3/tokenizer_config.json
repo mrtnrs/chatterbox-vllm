@@ -1,9 +1,0 @@
-{
-    "tokenizer_class": "PreTrainedTokenizerFast",
-    "unk_token": "[UNK]",
-    "bos_token": "[START]",
-    "eos_token": "[STOP]",
-    "pad_token": "[SPACE]",
-    "model_max_length": 131072
-  }
-  
