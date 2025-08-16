@@ -16,8 +16,9 @@ from chatterbox_vllm.models.voice_encoder import VoiceEncoder
 from chatterbox_vllm.models.t3 import SPEECH_TOKEN_OFFSET
 from chatterbox_vllm.models.t3.modules.cond_enc import T3Cond, T3CondEnc
 from chatterbox_vllm.models.t3.modules.learned_pos_emb import LearnedPositionEmbeddings
-from chatterbox_vllm.text_utils import punc_norm@dataclass
+from chatterbox_vllm.text_utils import punc_norm
 
+@dataclass
 class Conditionals:
     """
     Conditionals for T3 and S3Gen
@@ -72,65 +73,103 @@ def from_local(cls, ckpt_dir: str, target_device: str = "cuda",
                max_model_len: int = 1000, compile: bool = False,
                max_batch_size: int = 10,
                **kwargs) -> 'ChatterboxTTS':
+    import logging
+    log = logging.getLogger(__name__)
+    log.info(f"Starting ChatterboxTTS.from_local with ckpt_dir={ckpt_dir}, target_device={target_device}, max_model_len={max_model_len}")
+    log.info(f"Received kwargs: {kwargs}")
+
     ckpt_dir = Path(ckpt_dir)
+    log.info(f"Resolved ckpt_dir to: {ckpt_dir.absolute()}")
 
     t3_config = T3Config()
+    log.info("Initialized T3Config")
 
     # Load necessary weights for T3CondEnc
+    log.info(f"Loading weights from {ckpt_dir / 't3_cfg.safetensors'}")
     t3_weights = load_file(ckpt_dir / "t3_cfg.safetensors")
+    log.info("Loaded t3_cfg.safetensors")
 
     t3_enc = T3CondEnc(t3_config)
     t3_enc.load_state_dict({ k.replace('cond_enc.', ''):v for k,v in t3_weights.items() if k.startswith('cond_enc.') })
     t3_enc = t3_enc.to(device=target_device).eval()
+    log.info("Loaded and initialized T3CondEnc")
 
     t3_speech_emb = torch.nn.Embedding(t3_config.speech_tokens_dict_size, t3_config.n_channels)
     t3_speech_emb.load_state_dict({ k.replace('speech_emb.', ''):v for k,v in t3_weights.items() if k.startswith('speech_emb.') })
     t3_speech_emb = t3_speech_emb.to(device=target_device).eval()
+    log.info("Loaded and initialized t3_speech_emb")
 
     t3_speech_pos_emb = LearnedPositionEmbeddings(t3_config.max_speech_tokens + 2 + 2, t3_config.n_channels)
     t3_speech_pos_emb.load_state_dict({ k.replace('speech_pos_emb.', ''):v for k,v in t3_weights.items() if k.startswith('speech_pos_emb.') })
     t3_speech_pos_emb = t3_speech_pos_emb.to(device=target_device).eval()
+    log.info("Loaded and initialized t3_speech_pos_emb")
 
     total_gpu_memory = torch.cuda.get_device_properties(0).total_memory
     unused_gpu_memory = total_gpu_memory - torch.cuda.memory_allocated()
     vllm_memory_needed = (1.55*1024*1024*1024) + (max_batch_size * max_model_len * 1024 * 128)
     vllm_memory_percent = vllm_memory_needed / unused_gpu_memory
-
-    print(f"Giving vLLM {vllm_memory_percent * 100:.2f}% of GPU memory ({vllm_memory_needed / 1024**2:.2f} MB)")
+    log.info(f"Calculated vLLM memory: {vllm_memory_percent * 100:.2f}% of GPU memory ({vllm_memory_needed / 1024**2:.2f} MB)")
 
     model_path = os.path.abspath(str(ckpt_dir))
     # Use tokenizer path from kwargs if provided, else fall back to ckpt_dir
-    tokenizer_path = os.path.abspath(str(kwargs.get('tokenizer', ckpt_dir)))
+    tokenizer_path = os.path.abspath(str(kwargs.pop('tokenizer', ckpt_dir)))
+    log.info(f"Using model_path={model_path}, tokenizer_path={tokenizer_path}")
+    log.info(f"Remaining kwargs after pop: {kwargs}")
 
-    t3 = LLM(
-        model=model_path,
-        task="generate",
-        tokenizer=tokenizer_path,  # Use the resolved tokenizer path
-        tokenizer_mode="auto",    # Let vLLM use AutoTokenizer
-        max_model_len=max_model_len,
-        gpu_memory_utilization=vllm_memory_percent,
-        enforce_eager=not compile,
-        trust_remote_code=True,   # Allow loading tokenizer.py
-        **kwargs,
-    )
+    # Verify tokenizer files exist
+    tokenizer_json_path = os.path.join(tokenizer_path, "tokenizer.json")
+    tokenizer_py_path = os.path.join(tokenizer_path, "tokenizer.py")
+    log.info(f"Verifying tokenizer files: {tokenizer_json_path}, {tokenizer_py_path}")
+    if not os.path.exists(tokenizer_json_path) or not os.path.exists(tokenizer_py_path):
+        log.error(f"Tokenizer files missing: {tokenizer_json_path}, {tokenizer_py_path}")
+        raise FileNotFoundError(f"Tokenizer files missing: {tokenizer_json_path}, {tokenizer_py_path}")
+    # Log tokenizer.json contents
+    try:
+        with open(tokenizer_json_path, 'r') as f:
+            log.info(f"tokenizer.json contents (first 100 chars): {f.read()[:100]}...")
+    except Exception as e:
+        log.error(f"Failed to read tokenizer.json: {e}", exc_info=True)
+        raise
+
+    # Prepare LLM arguments
+    llm_kwargs = {
+        "model": model_path,
+        "task": "generate",
+        "tokenizer": tokenizer_path,
+        "tokenizer_mode": "auto",
+        "max_model_len": max_model_len,
+        "gpu_memory_utilization": vllm_memory_percent,
+        "enforce_eager": not compile,
+        "trust_remote_code": True,
+    }
+    llm_kwargs.update(kwargs)  # Add remaining kwargs
+    log.info(f"Calling vLLM LLM with arguments: {llm_kwargs}")
+
+    t3 = LLM(**llm_kwargs)
+    log.info("Initialized vLLM LLM")
 
     ve = VoiceEncoder()
     ve.load_state_dict(load_file(ckpt_dir / "ve.safetensors"))
     ve = ve.to(device=target_device).eval()
+    log.info("Loaded and initialized VoiceEncoder")
 
     s3gen = S3Gen()
     s3gen.load_state_dict(load_file(ckpt_dir / "s3gen.safetensors"), strict=False)
     s3gen = s3gen.to(device=target_device).eval()
+    log.info("Loaded and initialized S3Gen")
 
     default_conds = Conditionals.load(ckpt_dir / "conds.pt")
     default_conds.to(device=target_device)
+    log.info("Loaded and initialized default conditionals")
 
-    return cls(
+    instance = cls(
         target_device=target_device, max_model_len=max_model_len,
         t3=t3, t3_config=t3_config, t3_cond_enc=t3_enc, t3_speech_emb=t3_speech_emb, t3_speech_pos_emb=t3_speech_pos_emb,
         s3gen=s3gen, ve=ve, default_conds=default_conds,
     )
-    
+    log.info("Created ChatterboxTTS instance")
+    return instance
+
 @classmethod
 def from_pretrained(cls, ckpt_dir: str = "./t3-model", *args, **kwargs) -> 'ChatterboxTTS':
     # Assume ckpt_dir already contains all necessary files
