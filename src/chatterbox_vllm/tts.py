@@ -17,10 +17,7 @@ from chatterbox_vllm.models.t3 import SPEECH_TOKEN_OFFSET
 from chatterbox_vllm.models.t3.modules.cond_enc import T3Cond, T3CondEnc
 from chatterbox_vllm.models.t3.modules.learned_pos_emb import LearnedPositionEmbeddings
 from chatterbox_vllm.text_utils import punc_norm
-from .models.t3.entokenizer import EnTokenizer  # Add this import
 
-# Register EnTokenizer with transformers
-AutoTokenizer.register("EnTokenizer", EnTokenizer)
 
 @dataclass
 class Conditionals:
