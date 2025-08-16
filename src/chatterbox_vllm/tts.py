@@ -99,12 +99,13 @@ def from_local(cls, ckpt_dir: str, target_device: str = "cuda",
     print(f"Giving vLLM {vllm_memory_percent * 100:.2f}% of GPU memory ({vllm_memory_needed / 1024**2:.2f} MB)")
 
     model_path = os.path.abspath(str(ckpt_dir))
-    tokenizer_path = os.path.abspath(str(ckpt_dir))
+    # Use tokenizer path from kwargs if provided, else fall back to ckpt_dir
+    tokenizer_path = os.path.abspath(str(kwargs.get('tokenizer', ckpt_dir)))
 
     t3 = LLM(
         model=model_path,
         task="generate",
-        tokenizer=tokenizer_path,  # Point to absolute path for tokenizer
+        tokenizer=tokenizer_path,  # Use the resolved tokenizer path
         tokenizer_mode="auto",    # Let vLLM use AutoTokenizer
         max_model_len=max_model_len,
         gpu_memory_utilization=vllm_memory_percent,
@@ -129,7 +130,7 @@ def from_local(cls, ckpt_dir: str, target_device: str = "cuda",
         t3=t3, t3_config=t3_config, t3_cond_enc=t3_enc, t3_speech_emb=t3_speech_emb, t3_speech_pos_emb=t3_speech_pos_emb,
         s3gen=s3gen, ve=ve, default_conds=default_conds,
     )
-
+    
 @classmethod
 def from_pretrained(cls, ckpt_dir: str = "./t3-model", *args, **kwargs) -> 'ChatterboxTTS':
     # Assume ckpt_dir already contains all necessary files
