@@ -82,7 +82,7 @@ class ChatterboxTTS:
 
     @classmethod
     def from_local(
-        cls, ckpt_dir: str, target_device: str = "cuda",
+        cls, ckpt_dir: str, tokenizer=None, target_device: str = "cuda",
         max_model_len: int = 1000, compile: bool = False,
         max_batch_size: int = 10,
         **kwargs
@@ -146,11 +146,16 @@ class ChatterboxTTS:
             log.error(f"Failed to read tokenizer.json: {e}", exc_info=True)
             raise
 
+        if tokenizer is None:
+            from tokenizer import EnTokenizer
+            tokenizer = EnTokenizer()
+            tokenizer.load(str(ckpt_dir))
+
         # Prepare LLM arguments
         llm_kwargs = {
             "model": model_path,
             "task": "generate",
-            "tokenizer": tokenizer_path,
+            "tokenizer": tokenizer,
             "tokenizer_mode": "custom",
             "max_model_len": max_model_len,
             "gpu_memory_utilization": vllm_memory_percent,
