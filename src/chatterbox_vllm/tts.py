@@ -147,16 +147,15 @@ class ChatterboxTTS:
             raise
 
         if tokenizer is None:
-            from tokenizer import EnTokenizer
-            tokenizer = EnTokenizer()
-            tokenizer.load(str(ckpt_dir))
+            # Return path instead of tokenizer instance
+            tokenizer = str(ckpt_dir)
 
         # Prepare LLM arguments
         llm_kwargs = {
             "model": model_path,
             "task": "generate",
             "tokenizer": tokenizer,
-            "tokenizer_mode": "custom",
+            "tokenizer_mode": "auto",
             "max_model_len": max_model_len,
             "gpu_memory_utilization": vllm_memory_percent,
             "enforce_eager": not compile,
