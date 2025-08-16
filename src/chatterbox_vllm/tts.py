@@ -96,6 +96,7 @@ class ChatterboxTTS:
         log.info(f"Resolved ckpt_dir to: {ckpt_dir.absolute()}")
 
         t3_config = T3Config()
+        t3_config.model_type = "chatterboxt3"
         log.info("Initialized T3Config")
 
         # Load necessary weights for T3CondEnc
@@ -150,11 +151,14 @@ class ChatterboxTTS:
             "model": model_path,
             "task": "generate",
             "tokenizer": tokenizer_path,
-            "tokenizer_mode": "auto",
+            "tokenizer_mode": "custom",
             "max_model_len": max_model_len,
             "gpu_memory_utilization": vllm_memory_percent,
             "enforce_eager": not compile,
             "trust_remote_code": True,
+            "model_loader_extra_config": {  # ADD THIS SECTION
+                "model_class": "chatterbox_vllm.models.t3.modules.t3.ChatterboxT3"
+        }
         }
         llm_kwargs.update(kwargs)  # Add remaining kwargs
         log.info(f"Calling vLLM LLM with arguments: {llm_kwargs}")
