@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Optional, Union, Tuple, Any
 import time
 import os
+import json
 from vllm import LLM, SamplingParams
 from functools import lru_cache
 import librosa
@@ -146,6 +147,41 @@ class ChatterboxTTS:
             log.error(f"Failed to read tokenizer.json: {e}", exc_info=True)
             raise
 
+        # Log tokenizer_config.json and model config.json contents (relevant tokenizer fields)
+        try:
+            tok_cfg_path = os.path.join(tokenizer_path, "tokenizer_config.json")
+            if os.path.exists(tok_cfg_path):
+                with open(tok_cfg_path, 'r') as f:
+                    tok_cfg = json.load(f)
+                log.info(f"tokenizer_config.json tokenizer_class={tok_cfg.get('tokenizer_class')} auto_map={tok_cfg.get('auto_map')}")
+            else:
+                log.info(f"tokenizer_config.json not found at {tok_cfg_path}")
+        except Exception as e:
+            log.error(f"Failed to read tokenizer_config.json: {e}", exc_info=True)
+
+        try:
+            model_cfg_path = os.path.join(model_path, "config.json")
+            if os.path.exists(model_cfg_path):
+                with open(model_cfg_path, 'r') as f:
+                    model_cfg = json.load(f)
+                log.info(f"model config.json tokenizer_class={model_cfg.get('tokenizer_class')} auto_map={model_cfg.get('auto_map')}")
+            else:
+                log.info(f"model config.json not found at {model_cfg_path}")
+        except Exception as e:
+            log.error(f"Failed to read model config.json: {e}", exc_info=True)
+
+        # Preflight: try loading via HF directly (slow/fast) to see which class resolves
+        try:
+            tok_slow = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True, use_fast=False)
+            log.info(f"Preflight HF slow tokenizer class: {tok_slow.__class__.__module__}.{tok_slow.__class__.__name__}")
+        except Exception as e:
+            log.error(f"Preflight HF slow tokenizer failed: {e}", exc_info=True)
+        try:
+            tok_fast = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True, use_fast=True)
+            log.info(f"Preflight HF fast tokenizer class: {tok_fast.__class__.__module__}.{tok_fast.__class__.__name__}")
+        except Exception as e:
+            log.error(f"Preflight HF fast tokenizer failed: {e}", exc_info=True)
+
         if tokenizer is None:
             # Return path instead of tokenizer instance
             tokenizer = str(ckpt_dir)
@@ -159,10 +195,7 @@ class ChatterboxTTS:
             "max_model_len": max_model_len,
             "gpu_memory_utilization": vllm_memory_percent,
             "enforce_eager": not compile,
-            "trust_remote_code": True,
-            "model_loader_extra_config": {  # ADD THIS SECTION
-                "model_class": "chatterbox_vllm.models.t3.modules.t3.ChatterboxT3"
-        }
+            "trust_remote_code": True
         }
         llm_kwargs.update(kwargs)  # Add remaining kwargs
         log.info(f"Calling vLLM LLM with arguments: {llm_kwargs}")

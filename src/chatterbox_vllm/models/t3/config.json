@@ -1,7 +1,5 @@
 {
-    "architectures": [
-        "ChatterboxT3"
-    ],
+    "architectures": ["t3.ChatterboxT3"],
     "attention_bias": false,
     "attention_dropout": 0.0,
     "attn_implementation": "sdpa",
@@ -29,5 +27,11 @@
     "tie_word_embeddings": false,
     "torch_dtype": "bfloat16",
     "use_cache": true,
-    "vocab_size": 8
+    "vocab_size": 8,
+    "auto_map": { 
+        "AutoModel": "t3.ChatterboxT3",
+        "AutoTokenizer": ["tokenizer.EnTokenizer", "tokenizer.EnTokenizer"]
+    },
+    "tokenizer_file": "tokenizer.json",
+    "use_fast": true
 }

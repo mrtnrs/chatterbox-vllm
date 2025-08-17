@@ -8,6 +8,13 @@ from fastapi import HTTPException, Response, Header
 import shutil
 import sys
 import time
+import inspect
+import importlib
+# Heavy deps are optional locally; import lazily later
+transformers = None  # type: ignore
+tokenizers = None  # type: ignore
+_vllm = None  # type: ignore
+torch = None  # type: ignore
 
 # -------------------- Logging --------------------
 logging.basicConfig(
@@ -19,6 +26,12 @@ HARDCODED_API_KEY = "ilovefrietenmetmayo"
 
 log.info(f"Python version: {sys.version}")
 log.info(f"Running in Modal: {os.getenv('MODAL_ENVIRONMENT', 'local')}")
+
+# Ensure local src/ is importable before any package fallback
+ROOT = os.path.dirname(os.path.abspath(__file__))
+SRC_DIR = os.path.join(ROOT, "src")
+if SRC_DIR not in sys.path and os.path.isdir(SRC_DIR):
+    sys.path.insert(0, SRC_DIR)
 
 # -------------------- Modal Image --------------------
 vllm_image = (
@@ -35,7 +48,7 @@ vllm_image = (
         "huggingface_hub>=0.25.1",
         "safetensors>=0.3.0",
         "vllm==0.10.0",
-        f"git+https://github.com/mrtnrs/chatterbox-vllm",
+        f"git+https://github.com/mrtnrs/chatterbox-vllm#343553",
         "pydantic>=2.0,<3.0",
         "hf_transfer>=0.1.6",
         "tokenizers>=0.19.1",
@@ -44,11 +57,26 @@ vllm_image = (
     .env({
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
         "HF_HOME": "/root/.cache/huggingface",
+        "VLLM_NO_USAGE_STATS": "1",
     })
 )
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-os.environ["VLLM_MODEL_IMPLEMENTATION"] = "chatterbox_vllm.models.t3.modules.t3.ChatterboxT3"
+os.environ["VLLM_MODEL_IMPLEMENTATION"] = "t3.ChatterboxT3"
+try:
+    import transformers as transformers  # noqa: F401
+    import tokenizers as tokenizers  # noqa: F401
+    import vllm as _vllm  # noqa: F401
+    import torch as torch  # noqa: F401
+    log.info(
+        f"versions: transformers={transformers.__version__}, "
+        f"tokenizers={tokenizers.__version__}, vllm={getattr(_vllm, '__version__', 'unknown')}, torch={torch.__version__}"
+    )
+    log.info(f"CUDA available={torch.cuda.is_available()} device_count={torch.cuda.device_count()}")
+except Exception as e:
+    log.warning(f"Optional deps not available locally: {e}. Will import inside _get_model() when running in container.")
+log.info(f"VLLM_MODEL_IMPLEMENTATION={os.environ.get('VLLM_MODEL_IMPLEMENTATION')}")
+log.info(f"sys.path[0:5]={sys.path[:5]}")
 
 hf_cache_vol = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
 app = modal.App("chatterbox-vllm-tts")
@@ -59,7 +87,7 @@ _sr = 24000
 MODEL_DIR = "t3-model"
 
 HARDCODED_CONFIG_JSON = {
-    "architectures": ["ChatterboxT3"],
+    "architectures": "t3.ChatterboxT3",
     "attention_bias": False,
     "attention_dropout": 0.0,
     "attn_implementation": "sdpa",
@@ -89,8 +117,10 @@ HARDCODED_CONFIG_JSON = {
     "use_cache": True,
     "vocab_size": 8,
     "auto_map": {  # CRITICAL ADDITION
-        "AutoModel": "chatterbox_vllm.models.t3.modules.t3.ChatterboxT3"
-    }
+        "AutoModel": "t3.ChatterboxT3"
+    },
+    "tokenizer_file": "tokenizer.json",
+    "use_fast": True,
 }
 
 def _get_model():
@@ -103,6 +133,21 @@ def _get_model():
     from chatterbox_vllm.tts import ChatterboxTTS
     from chatterbox_vllm.text_utils import punc_norm
     from huggingface_hub import hf_hub_download
+    import chatterbox_vllm as _cb
+    log.info(f"Using chatterbox_vllm from: {_cb.__file__}")
+    # Import heavy deps inside container/runtime
+    try:
+        import transformers as transformers  # noqa: F401
+        import tokenizers as tokenizers  # noqa: F401
+        import vllm as _vllm  # noqa: F401
+        import torch as torch  # noqa: F401
+        log.info(
+            f"versions (container): transformers={transformers.__version__}, "
+            f"tokenizers={tokenizers.__version__}, vllm={getattr(_vllm, '__version__', 'unknown')}, torch={torch.__version__}"
+        )
+        log.info(f"CUDA available={torch.cuda.is_available()} device_count={torch.cuda.device_count()}")
+    except Exception as e:
+        log.warning(f"Heavy deps import in _get_model failed: {e}")
 
     # -------------------- Ensure Model Dir --------------------
     os.makedirs(MODEL_DIR, exist_ok=True)
@@ -113,27 +158,227 @@ def _get_model():
     for fpath in files_to_download:
         log.info(f"Downloading {fpath}...")
         hf_hub_download("ResembleAI/chatterbox", fpath, local_dir=MODEL_DIR)
+    # Verify downloaded files
+    for fpath in files_to_download:
+        full = os.path.join(MODEL_DIR, fpath)
+        exists = os.path.exists(full)
+        size = os.path.getsize(full) if exists else -1
+        log.info(f"Verified file: {full} exists={exists} size={size}")
 
-    import chatterbox_vllm
-    shutil.copy(
-        os.path.join(chatterbox_vllm.__path__[0], "models", "t3", "entokenizer.py"),
-        os.path.join(MODEL_DIR, "tokenizer.py"),
-    )
+    # Write a fresh tokenizer.py to MODEL_DIR to ensure correct from_pretrained signature
+    dest_tok = os.path.join(MODEL_DIR, "tokenizer.py")
+    TOKENIZER_PY = '''
+import logging
+import os
+from typing import List, Optional, Union
+
+import torch
+from tokenizers import Tokenizer
+from transformers import PreTrainedTokenizerFast
+
+
+# Special tokens
+SOT = "[START]"
+EOT = "[STOP]"
+UNK = "[UNK]"
+SPACE = "[SPACE]"
+SPECIAL_TOKENS = [SOT, EOT, UNK, SPACE, "[PAD]", "[SEP]", "[CLS]", "[MASK]"]
+
+logger = logging.getLogger(__name__)
+
+class EnTokenizer(PreTrainedTokenizerFast):
+    """
+    A VLLM-compatible fast tokenizer that wraps the rust-based Tokenizer.
+    """
+    model_input_names = ["input_ids", "attention_mask"]
+    
+    def __init__(
+        self,
+        vocab_file: str,
+        unk_token: str = UNK,
+        pad_token: str = "[PAD]",
+        sep_token: str = "[SEP]",
+        cls_token: str = "[CLS]",
+        mask_token: str = "[MASK]",
+        **kwargs
+    ):
+        tokenizer_object = Tokenizer.from_file(vocab_file)
+        super().__init__(
+            tokenizer_object=tokenizer_object,
+            unk_token=unk_token,
+            pad_token=pad_token,
+            sep_token=sep_token,
+            cls_token=cls_token,
+            mask_token=mask_token,
+            **kwargs
+        )
+        self.check_vocabset_sot_eot()
+
+    def check_vocabset_sot_eot(self):
+        voc = self.get_vocab()
+        assert SOT in voc
+        assert EOT in voc
+
+    def get_vocab_size(self) -> int:
+        return self._tokenizer.get_vocab_size()
+
+    def _tokenize(self, text: str, **kwargs) -> List[str]:
+        text = text.replace(' ', SPACE)
+        return super()._tokenize(text, **kwargs)
+
+    def encode(self, txt: str, verbose=False, return_tensors: Optional[str] = None, add_special_tokens: bool = True, **kwargs):
+        """Override for custom preprocessing; supports legacy params."""
+        txt = txt.replace(' ', SPACE)
+        encoded = super().encode(txt, add_special_tokens=add_special_tokens, **kwargs)
+        if return_tensors == "pt":
+            return torch.tensor(encoded).unsqueeze(0)
+        return encoded
+
+    def decode(self, seq, **kwargs):
+        """Override for custom postprocessing; supports legacy params."""
+        if isinstance(seq, torch.Tensor):
+            seq = seq.cpu().numpy()
+        txt: str = super().decode(seq, **kwargs)
+        txt = txt.replace(' ', '')
+        txt = txt.replace(SPACE, ' ')
+        txt = txt.replace(EOT, '')
+        txt = txt.replace(UNK, '')
+        return txt
+
+    def convert_tokens_to_string(self, tokens: List[str]) -> str:
+        text = "".join(tokens)
+        text = text.replace(' ', '')
+        text = text.replace(SPACE, ' ')
+        text = text.replace(EOT, '')
+        text = text.replace(UNK, '')
+        return text
+
+    def save_pretrained(self, save_directory: Union[str, os.PathLike], **kwargs):
+        """
+        Save the tokenizer to a directory.
+        """
+        if not os.path.isdir(save_directory):
+            os.makedirs(save_directory, exist_ok=True)
+        self._tokenizer.save(os.path.join(save_directory, "tokenizer.json"))
+
+    def text_to_tokens(self, text: str):
+        """Legacy method for backward compatibility"""
+        text_tokens = self.encode(text)
+        text_tokens = torch.IntTensor(text_tokens).unsqueeze(0)
+        return text_tokens
+
+    @property
+    def max_token_id(self) -> int:
+        return max(self.get_vocab().values())
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *inputs, **kwargs):
+        """
+        Instantiate a tokenizer from a pretrained model or path.
+    
+        Args:
+            pretrained_model_name_or_path: Path to the directory containing tokenizer.json
+            *inputs: Additional positional arguments
+            **kwargs: Additional keyword arguments to pass to the tokenizer
+        """
+        vocab_file = os.path.join(pretrained_model_name_or_path, "tokenizer.json")
+        if not os.path.exists(vocab_file):
+            raise ValueError(f"tokenizer.json not found at {pretrained_model_name_or_path}")
+        return cls(vocab_file=vocab_file, *inputs, **kwargs)
+'''
+    with open(dest_tok, "w") as f:
+        f.write(TOKENIZER_PY)
+    log.info(f"Wrote tokenizer.py to {dest_tok}")
+
+    # Write a lightweight t3.py shim so AutoModel can import t3.ChatterboxT3
+    t3_py_path = os.path.join(MODEL_DIR, "t3.py")
+    T3_PY = '''
+"""
+Minimal t3.py shim for Transformers/vLLM dynamic import.
+
+Purpose:
+- Allow dynamic_module_utils.get_class_from_dynamic_module to import
+  a class named `ChatterboxT3` from the module `t3` referenced by
+  config.json's auto_map ("AutoModel": "t3.ChatterboxT3").
+
+Notes:
+- This class is a minimal stub to satisfy architecture resolution.
+- vLLM will not use this class for execution; it loads weights via its
+  own runtime. If instantiated by Transformers, this class simply
+  creates a bare PreTrainedModel which should be sufficient for any
+  metadata checks.
+"""
+
+from transformers import PreTrainedModel, PretrainedConfig
+
+
+class ChatterboxT3(PreTrainedModel):
+    config_class = PretrainedConfig
+
+    def __init__(self, config: PretrainedConfig, *args, **kwargs):
+        super().__init__(config)
+
+
+__all__ = ["ChatterboxT3"]
+'''
+    with open(t3_py_path, "w") as f:
+        f.write(T3_PY)
+    log.info(f"Wrote t3.py shim to {t3_py_path}")
+    # Ensure MODEL_DIR is importable and test shim import
+    if MODEL_DIR not in sys.path:
+        sys.path.insert(0, MODEL_DIR)
+    try:
+        mod = importlib.import_module("t3")
+        cls = getattr(mod, "ChatterboxT3", None)
+        log.info(
+            f"Shim import test: module={mod.__name__} file={getattr(mod, '__file__', '?')} class_ok={cls is not None}"
+        )
+    except Exception as e:
+        log.exception(f"Shim import test failed: {e}")
 
     with open(os.path.join(MODEL_DIR, "config.json"), "w") as f:
         json.dump(HARDCODED_CONFIG_JSON, f, indent=2)
+    # Log model config.json for diagnostics
+    try:
+        with open(os.path.join(MODEL_DIR, "config.json")) as f:
+            log.info(f"config.json: {f.read()}")
+    except Exception as e:
+        log.exception(f"Failed reading config.json: {e}")
+    log.info(f"auto_map in HARDCODED_CONFIG_JSON: {HARDCODED_CONFIG_JSON.get('auto_map')}")
 
-    # Write tokenizer_config.json
+    # Write tokenizer_config.json (favor auto_map; avoid bare tokenizer_class)
     tokenizer_config = {
-        "tokenizer_class": "EnTokenizer",
+        "auto_map": {
+            "AutoTokenizer": ["tokenizer.EnTokenizer", "tokenizer.EnTokenizer"]
+        },
+        "tokenizer_file": "tokenizer.json",
+        "use_fast": True,
         "trust_remote_code": True
     }
     with open(os.path.join(MODEL_DIR, "tokenizer_config.json"), "w") as f:
         json.dump(tokenizer_config, f, indent=2)
 
+    with open(os.path.join(MODEL_DIR, "tokenizer_config.json")) as f:
+        log.info(f"tokenizer_config.json: {f.read()}")
+    # Preflight AutoTokenizer loads to mirror vLLM behavior
+    try:
+        from transformers import AutoTokenizer
+        tok_slow = AutoTokenizer.from_pretrained(os.path.abspath(MODEL_DIR), trust_remote_code=True, use_fast=False, local_files_only=True)
+        log.info(f"AutoTokenizer slow class: {tok_slow.__class__.__module__}.{tok_slow.__class__.__name__}")
+    except Exception as e:
+        log.exception(f"AutoTokenizer slow failed: {e}")
+    try:
+        from transformers import AutoTokenizer as _AT2
+        tok_fast = _AT2.from_pretrained(os.path.abspath(MODEL_DIR), trust_remote_code=True, use_fast=True, local_files_only=True)
+        log.info(f"AutoTokenizer fast class: {tok_fast.__class__.__module__}.{tok_fast.__class__.__name__}")
+    except Exception as e:
+        log.exception(f"AutoTokenizer fast failed: {e}")
+    
     # Proper tokenizer initialization
     sys.path.append(MODEL_DIR)
     from tokenizer import EnTokenizer
+    # Verify runtime signature to avoid mismatch
+    log.info(f"EnTokenizer.from_pretrained signature: {inspect.signature(EnTokenizer.from_pretrained)}")
     
     # Get the path to tokenizer.json
     tokenizer_path = os.path.join(MODEL_DIR, "tokenizer.json")
@@ -148,7 +393,9 @@ def _get_model():
     log.info("Loading ChatterboxTTS model...")
     _model = ChatterboxTTS.from_local(
         ckpt_dir=MODEL_DIR,
-        tokenizer=MODEL_DIR
+        tokenizer=os.path.abspath(MODEL_DIR),
+        tokenizer_mode="auto",
+        model_loader_extra_config={"model_class": "t3.ChatterboxT3"}
     )
     _sr = _model.sr
     log.info(f"Model loaded successfully (SR={_sr})")
@@ -257,6 +504,11 @@ def generate_tts():
             audio_prompt_path = "/tmp/ref_audio.mp3"
             with open(audio_prompt_path, "wb") as f:
                 f.write(r.content)
+            try:
+                _sz = os.path.getsize(audio_prompt_path)
+            except Exception:
+                _sz = -1
+            log.info(f"Downloaded audio prompt → {audio_prompt_path} ({_sz} bytes)")
 
         log.info("Generating speech...")
         audios = model.generate(
@@ -264,6 +516,10 @@ def generate_tts():
             audio_prompt_path=audio_prompt_path,
             exaggeration=payload.exaggeration
         )
+        try:
+            log.info(f"Generated audio shape={audios[0].shape}, dtype={audios[0].dtype}, sr={model.sr}")
+        except Exception:
+            pass
 
         buf = io.BytesIO()
         ta.save(buf, audios[0], model.sr, format="mp3")
